@@ -1,4 +1,4 @@
-"""Utilidades compartidas de seguridad de datos."""
+"""Utilidades compartidas de seguridad y normalización de datos."""
 
 from __future__ import annotations
 
@@ -15,3 +15,14 @@ def mask_pii(value: str, visible_chars: int = 2) -> str:
     if len(value) <= visible_chars:
         return "*" * len(value)
     return value[:visible_chars] + "*" * (len(value) - visible_chars)
+
+
+def normalize_name(value: str) -> str:
+    """Normaliza un nombre o dirección para usarlo como bridge key en Redis.
+    Ej: normalize_name('  Júlia   Almeida ') -> 'julia almeida'
+    
+    Evita que diferencias de mayúsculas o dobles espacios rompan el enlazamiento.
+    """
+    if not value:
+        return ""
+    return " ".join(value.lower().strip().split())
