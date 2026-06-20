@@ -11,7 +11,7 @@ import json
 import logging
 import os
 from datetime import datetime, timezone
-
+from core.utils import mask_pii
 from confluent_kafka import Consumer, KafkaError
 from pymongo.errors import DuplicateKeyError
 
@@ -78,6 +78,18 @@ def run_consumer() -> None:
             try:
                 raw_collection.insert_one(document)
                 processed += 1
+                identifier = (
+                    payload.get("passport")
+                    or payload.get("email")
+                    or payload.get("address")
+                )
+                if identifier:
+                    logger.debug(
+                        "Mensaje persistido, identificador=%s (partition=%s offset=%s)",
+                        mask_pii(str(identifier)),
+                        msg.partition(),
+                        msg.offset(),
+                    )
             except DuplicateKeyError:
                 # Redelivery por at-least-once: el indice unico
                 # (topic, partition, offset) ya lo tenia guardado.
@@ -110,4 +122,6 @@ def run_consumer() -> None:
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
+    logging.getLogger("pymongo").setLevel(logging.WARNING)
+    logging.getLogger("confluent_kafka").setLevel(logging.WARNING)
     run_consumer()
