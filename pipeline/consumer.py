@@ -1,7 +1,7 @@
 """
-Consumer de Kafka. Responsabilidad ÚNICA: leer mensajes, validarlos con
-Pydantic y persistirlos tal cual en MongoDB.raw_messages con estado 'raw'.
-NO resuelve identidad ni ensambla (eso es del #8/#6).
+Consumer de Kafka end-to-end (Issue #8).
+
+Flujo: Kafka -> Pydantic -> MongoDB (raw) -> Redis (Identidad + Ensamble) -> PostgreSQL (Curado)
 """
 
 from __future__ import annotations
@@ -15,9 +15,12 @@ from confluent_kafka import Consumer, KafkaError
 from pymongo.errors import DuplicateKeyError
 from pydantic import ValidationError
 
-from core.database import get_raw_messages_collection
+from core.database import get_raw_messages_collection, get_redis_client
 from core.schemas import KafkaMessagePayload
 from core.utils import mask_pii
+from pipeline.identity import resolve_identity
+from pipeline.assembler import assemble_employee
+from pipeline.sql_writer import upsert_employee
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +40,7 @@ def run_consumer() -> None:
     consumer = build_consumer()
     consumer.subscribe([topic])
     raw_collection = get_raw_messages_collection()
+    redis_client = get_redis_client()
 
     logger.info("Consumer escuchando en topic=%s", topic)
 
@@ -44,6 +48,7 @@ def run_consumer() -> None:
     duplicates = 0
     malformed = 0
     validation_errors = 0
+    assembled = 0
 
     try:
         while True:
@@ -67,11 +72,8 @@ def run_consumer() -> None:
                 consumer.commit(message=msg)
                 continue
 
-            # --- NUEVO EN EL #8: Validación con Pydantic ---
             try:
                 validated_payload = KafkaMessagePayload.model_validate(payload)
-                # Convertimos el modelo validado de vuelta a dict para guardarlo en Mongo
-                # Usamos by_alias=True para conservar nombres originales como "company address"
                 payload_to_store = validated_payload.model_dump(by_alias=True, exclude_none=True)
             except ValidationError as exc:
                 validation_errors += 1
@@ -79,7 +81,6 @@ def run_consumer() -> None:
                     "Validación Pydantic fallida en partition=%s offset=%s: %s",
                     msg.partition(), msg.offset(), exc,
                 )
-                # Si no valida, lo descartamos y comiteamos para no atascar Kafka
                 consumer.commit(message=msg)
                 continue
 
@@ -114,19 +115,34 @@ def run_consumer() -> None:
                     "Mensaje duplicado ignorado (topic=%s partition=%s offset=%s)",
                     msg.topic(), msg.partition(), msg.offset(),
                 )
+                # Si ya está en Mongo, ya lo procesamos antes. Saltamos el ETL.
+                consumer.commit(message=msg)
+                continue
+
+            # --- NUEVO EN EL #8: Cableado ETL (Redis + Postgres) ---
+            try:
+                passport = resolve_identity(payload_to_store, redis_client)
+                if passport:
+                    assembled_data = assemble_employee(passport, payload_to_store, redis_client)
+                    upsert_employee(assembled_data)
+                    assembled += 1
+                else:
+                    logger.debug("Fragmento huérfano sin identidad resoluble todavía.")
+            except Exception as e:
+                logger.error("Error en el ensamblado/persistencia: %s", e)
 
             consumer.commit(message=msg)
 
             if (processed + duplicates) % 100 == 0 and (processed + duplicates) > 0:
                 logger.info(
-                    "Progreso: %s nuevos, %s duplicados, %s malformados, %s inválidos",
-                    processed, duplicates, malformed, validation_errors,
+                    "Progreso: %s nuevos, %s duplicados, %s malformados, %s inválidos, %s ensamblados",
+                    processed, duplicates, malformed, validation_errors, assembled
                 )
 
     except KeyboardInterrupt:
         logger.info(
-            "Consumer detenido por el usuario. Total: %s nuevos, %s duplicados, %s malformados, %s inválidos",
-            processed, duplicates, malformed, validation_errors,
+            "Consumer detenido por el usuario. Total: %s nuevos, %s duplicados, %s malformados, %s inválidos, %s ensamblados",
+            processed, duplicates, malformed, validation_errors, assembled
         )
     finally:
         consumer.close()
