@@ -32,6 +32,7 @@ MESSAGES_DUPLICATES = Counter('kafka_messages_duplicates_total', 'Total duplicat
 MESSAGES_MALFORMED = Counter('kafka_messages_malformed_total', 'Total malformed messages')
 MESSAGES_INVALID = Counter('kafka_messages_invalid_total', 'Total invalid Pydantic messages')
 EMPLOYEES_ASSEMBLED = Counter('employees_assembled_total', 'Total employees assembled and persisted')
+ORPHANS_CREATED = Counter('orphans_created_total', 'Total orphan messages without identity') # <--- NUEVA
 
 
 def build_consumer() -> Consumer:
@@ -152,6 +153,8 @@ def run_consumer() -> None:
                     if payload_to_store.get("fullname"):
                         orphan_type = "Esperando Passport (Tiene Nombre)"
                     
+                    ORPHANS_CREATED.inc() # <--- AÑADE ESTO
+
                     raw_collection.update_one({"_id": document["_id"]}, {"$set": {
                         "status": "orphan",
                         "orphan_type": orphan_type
