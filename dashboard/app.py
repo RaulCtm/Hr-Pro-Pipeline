@@ -1,13 +1,12 @@
 """
-Plataforma de Observabilidad de RRHH (Issue #9) - Multi-Página.
+Plataforma de Observabilidad de RRHH (Issue #9 + #17) - Multi-Página.
 
 Consume datos de PostgreSQL (empleados) y MongoDB (huérfanos).
-Diseñado con un tema corporativo azul armonizado.
+Diseñado con un tema corporativo azul armonizado y respeta la encriptación a nivel de BD.
 """
 
 import streamlit as st
 import pandas as pd
-import re
 from core.database import get_postgres_connection, get_raw_messages_collection
 
 # --- CONFIGURACIÓN DE PÁGINA Y TEMA ---
@@ -88,20 +87,23 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-@st.cache_data(ttl=5)
+@st.cache_data(ttl=5) # Cache corto para ver datos en tiempo real
 def load_postgres_data() -> pd.DataFrame:
     conn = get_postgres_connection()
     if not conn: return pd.DataFrame()
     try:
         query = "SELECT * FROM v_employees_complete;"
         df = pd.read_sql(query, conn)
-        def parse_salary(val):
-            if pd.isna(val) or val == "": return 0.0
-            try:
-                clean_val = re.sub(r'[^\d]', '', str(val))
-                return float(clean_val) if clean_val else 0.0
-            except ValueError: return 0.0
-        df['salary_num'] = df['salary'].apply(parse_salary)
+        
+        # Como los datos financieros están encriptados (BYTEA), Streamlit no sabe 
+        # serializarlos en caché. Los convertimos a booleanos (True/False) aquí mismo.
+        if 'iban_encrypted' in df.columns:
+            df['has_iban'] = df['iban_encrypted'].notna()
+            df = df.drop(columns=['iban_encrypted'])
+        if 'salary_encrypted' in df.columns:
+            df['has_salary'] = df['salary_encrypted'].notna()
+            df = df.drop(columns=['salary_encrypted'])
+            
         return df
     except Exception as e:
         st.error(f"Error al leer PostgreSQL: {e}")
@@ -154,8 +156,8 @@ if page == "Panel General":
     with col2: st.metric("Empresas Activas", df_pg['company_name'].nunique())
     with col3: st.metric("Ciudades", df_pg['city'].nunique())
     with col4:
-        avg_salary = df_pg[df_pg['salary_num'] > 0]['salary_num'].mean()
-        st.metric("Nómina Media", f"{avg_salary:,.0f} $" if avg_salary > 0 else "N/A")
+        iban_count = df_pg['has_iban'].sum()
+        st.metric("Empleados con IBAN", iban_count)
 
     st.markdown("<div class='section-title'>Explorador Rápido</div>", unsafe_allow_html=True)
     
@@ -165,7 +167,7 @@ if page == "Panel General":
         companies = ['Todas'] + sorted(df_pg['company_name'].dropna().unique().tolist())
         selected_company = st.selectbox("Filtrar por Empresa", companies, key="gen_company")
     with f_col3:
-        sort_options = {'Nombre Completo': 'fullname', 'Fecha de Actualización': 'updated_at', 'Salario': 'salary_num'}
+        sort_options = {'Nombre Completo': 'fullname', 'Fecha de Actualización': 'updated_at', 'Ciudad': 'city'}
         sort_by = st.selectbox("Ordenar por", list(sort_options.keys()), key="gen_sort")
     with f_col4:
         order_label = st.selectbox("Orden", ['Ascendente', 'Descendente'], key="gen_order")
@@ -184,10 +186,10 @@ if page == "Panel General":
     
     filtered_df = filtered_df.sort_values(by=sort_options[sort_by], ascending=ascending, na_position='last')
 
-    columns_to_show = ['fullname', 'personal_email', 'company_name', 'job_title', 'salary_num', 'updated_at']
+    columns_to_show = ['fullname', 'personal_email', 'company_name', 'job_title', 'city', 'updated_at']
     st.dataframe(filtered_df[columns_to_show].rename(columns={
         'fullname': 'Nombre', 'personal_email': 'Email', 'company_name': 'Empresa',
-        'job_title': 'Puesto', 'salary_num': 'Salario ($)', 'updated_at': 'Actualizado'
+        'job_title': 'Puesto', 'city': 'Ciudad', 'updated_at': 'Actualizado'
     }), use_container_width=True, hide_index=True, height=400)
 
 
@@ -200,7 +202,6 @@ elif page == "Empleados Completos":
     st.markdown("<p class='subtitle'>Filtrado automático: Empleados con identidad y ubicación resuelta, y al menos un fragmento de empresa/finanzas enlazado.</p>", unsafe_allow_html=True)
 
     # Lógica para filtrar empleados "completos"
-    # Exigimos las Bridge Keys principales y el dato de empresa (que viene en otro fragmento)
     complete_df = df_pg[
         df_pg['fullname'].notna() & (df_pg['fullname'] != '') &
         df_pg['address'].notna() & (df_pg['address'] != '') &
@@ -214,8 +215,8 @@ elif page == "Empleados Completos":
     col1, col2 = st.columns(2)
     with col1: st.metric("Empleados Ensamblados", len(complete_df))
     with col2:
-        avg_salary_complete = complete_df[complete_df['salary_num'] > 0]['salary_num'].mean()
-        st.metric("Nómina Media", f"{avg_salary_complete:,.0f} $" if avg_salary_complete > 0 else "N/A")
+        iban_count_complete = complete_df['has_iban'].sum()
+        st.metric("Con IBAN Registrado", iban_count_complete)
 
     st.markdown("<div style='height: 2rem;'></div>", unsafe_allow_html=True)
 
@@ -226,7 +227,7 @@ elif page == "Empleados Completos":
         companies_c = ['Todas'] + sorted(complete_df['company_name'].dropna().unique().tolist())
         selected_company_c = st.selectbox("Filtrar por Empresa", companies_c, key="comp_company")
     with f_col3:
-        sort_options_c = {'Nombre Completo': 'fullname', 'Salario': 'salary_num', 'Ciudad': 'city'}
+        sort_options_c = {'Nombre Completo': 'fullname', 'Ciudad': 'city', 'Fecha de Actualización': 'updated_at'}
         sort_by_c = st.selectbox("Ordenar por", list(sort_options_c.keys()), key="comp_sort")
     with f_col4:
         order_label_c = st.selectbox("Orden", ['Ascendente', 'Descendente'], key="comp_order")
@@ -245,13 +246,19 @@ elif page == "Empleados Completos":
 
     filtered_complete_df = filtered_complete_df.sort_values(by=sort_options_c[sort_by_c], ascending=ascending_c, na_position='last')
 
+    # --- Data Masking para RRHH (Basado en Encriptación de BD) ---
+    display_df = filtered_complete_df.copy()
+    # Convertimos los booleanos a 'Sí'/'No' para que se vea bonito en la tabla
+    display_df['has_iban'] = display_df['has_iban'].apply(lambda x: 'Sí' if x else 'No')
+    display_df['has_salary'] = display_df['has_salary'].apply(lambda x: 'Sí' if x else 'No')
+
     # Mostramos todos los campos ensamblados
-    columns_to_show_c = ['fullname', 'personal_email', 'personal_phone', 'address', 'city', 'country', 'company_name', 'job_title', 'iban', 'salary_num', 'updated_at']
+    columns_to_show_c = ['fullname', 'personal_email', 'personal_phone', 'address', 'city', 'country', 'company_name', 'job_title', 'has_iban', 'has_salary', 'updated_at']
     st.dataframe(
-        filtered_complete_df[columns_to_show_c].rename(columns={
+        display_df[columns_to_show_c].rename(columns={
             'fullname': 'Nombre Completo', 'personal_email': 'Email', 'personal_phone': 'Teléfono',
             'address': 'Dirección', 'city': 'Ciudad', 'country': 'País', 'company_name': 'Empresa',
-            'job_title': 'Puesto', 'iban': 'IBAN', 'salary_num': 'Salario ($)', 'updated_at': 'Actualizado'
+            'job_title': 'Puesto', 'has_iban': 'IBAN Registrado', 'has_salary': 'Salario Registrado', 'updated_at': 'Actualizado'
         }),
         use_container_width=True, hide_index=True, height=500
     )
