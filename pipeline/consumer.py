@@ -126,8 +126,18 @@ def run_consumer() -> None:
                     assembled_data = assemble_employee(passport, payload_to_store, redis_client)
                     upsert_employee(assembled_data)
                     assembled += 1
+                    # Marcamos el mensaje en Mongo como ensamblado
+                    raw_collection.update_one({"_id": document["_id"]}, {"$set": {"status": "assembled"}})
                 else:
-                    logger.debug("Fragmento huérfano sin identidad resoluble todavía.")
+                    # Clasificamos el huérfano en MongoDB para el dashboard
+                    orphan_type = "Irresoluble (Sin Identificadores)"
+                    if payload_to_store.get("fullname"):
+                        orphan_type = "Esperando Passport (Tiene Nombre)"
+                    
+                    raw_collection.update_one({"_id": document["_id"]}, {"$set": {
+                        "status": "orphan",
+                        "orphan_type": orphan_type
+                    }})
             except Exception as e:
                 logger.error("Error en el ensamblado/persistencia: %s", e)
 
