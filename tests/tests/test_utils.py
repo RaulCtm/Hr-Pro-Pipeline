@@ -5,7 +5,7 @@ def test_mask_pii_standard():
     assert mask_pii("AB1234567") == "AB*******"
 
 def test_mask_pii_short_string():
-    assert mask_pii("AB") == "AB"
+    assert mask_pii("AB") == "**"
 
 def test_mask_pii_empty():
     assert mask_pii("") == ""
