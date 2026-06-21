@@ -10,6 +10,8 @@ dependencies = [
     "psycopg2-binary>=2.9.9",
     "pydantic>=2.5.0",
     "python-dotenv>=1.0.0",
+    "plotly>=6.8.0",
+    "prometheus-client>=0.25.0",
 ]
 
 [dependency-groups]
