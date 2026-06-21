@@ -1,7 +1,8 @@
 """
-Consumer de Kafka end-to-end (Issue #8).
+Consumer de Kafka end-to-end instrumentado (Issue #18).
 
 Flujo: Kafka -> Pydantic -> MongoDB (raw) -> Redis (Identidad + Ensamble) -> PostgreSQL (Curado)
+Métricas expuestas en puerto 8000 para Prometheus.
 """
 
 from __future__ import annotations
@@ -14,6 +15,7 @@ from datetime import datetime, timezone
 from confluent_kafka import Consumer, KafkaError
 from pymongo.errors import DuplicateKeyError
 from pydantic import ValidationError
+from prometheus_client import start_http_server, Counter
 
 from core.database import get_raw_messages_collection, get_redis_client
 from core.schemas import KafkaMessagePayload
@@ -23,6 +25,14 @@ from pipeline.assembler import assemble_employee
 from pipeline.sql_writer import upsert_employee
 
 logger = logging.getLogger(__name__)
+
+# --- MÉTRICAS PROMETHEUS ---
+MESSAGES_PROCESSED = Counter('kafka_messages_processed_total', 'Total messages processed')
+MESSAGES_DUPLICATES = Counter('kafka_messages_duplicates_total', 'Total duplicate messages')
+MESSAGES_MALFORMED = Counter('kafka_messages_malformed_total', 'Total malformed messages')
+MESSAGES_INVALID = Counter('kafka_messages_invalid_total', 'Total invalid Pydantic messages')
+EMPLOYEES_ASSEMBLED = Counter('employees_assembled_total', 'Total employees assembled and persisted')
+ORPHANS_CREATED = Counter('orphans_created_total', 'Total orphan messages without identity') # <--- NUEVA
 
 
 def build_consumer() -> Consumer:
@@ -36,6 +46,10 @@ def build_consumer() -> Consumer:
 
 
 def run_consumer() -> None:
+    # Iniciamos el servidor HTTP para Prometheus en el puerto 8000
+    start_http_server(8000)
+    logger.info("Servidor de métricas Prometheus iniciado en puerto 8000")
+
     topic = os.getenv("KAFKA_TOPIC", "probando")
     consumer = build_consumer()
     consumer.subscribe([topic])
@@ -44,6 +58,7 @@ def run_consumer() -> None:
 
     logger.info("Consumer escuchando en topic=%s", topic)
 
+    # Contadores locales para log en terminal
     processed = 0
     duplicates = 0
     malformed = 0
@@ -65,6 +80,7 @@ def run_consumer() -> None:
                 payload = json.loads(msg.value().decode("utf-8"))
             except (json.JSONDecodeError, UnicodeDecodeError) as exc:
                 malformed += 1
+                MESSAGES_MALFORMED.inc()
                 logger.warning(
                     "Mensaje no parseable en partition=%s offset=%s: %s",
                     msg.partition(), msg.offset(), exc,
@@ -74,9 +90,10 @@ def run_consumer() -> None:
 
             try:
                 validated_payload = KafkaMessagePayload.model_validate(payload)
-                payload_to_store = validated_payload.model_dump(by_alias=True, exclude_none=True)
+                payload_to_store = validated_payload.model_dump(exclude_none=True)
             except ValidationError as exc:
                 validation_errors += 1
+                MESSAGES_INVALID.inc()
                 logger.warning(
                     "Validación Pydantic fallida en partition=%s offset=%s: %s",
                     msg.partition(), msg.offset(), exc,
@@ -96,6 +113,7 @@ def run_consumer() -> None:
             try:
                 raw_collection.insert_one(document)
                 processed += 1
+                MESSAGES_PROCESSED.inc()
                 identifier = (
                     payload_to_store.get("passport")
                     or payload_to_store.get("email")
@@ -111,21 +129,22 @@ def run_consumer() -> None:
                     )
             except DuplicateKeyError:
                 duplicates += 1
+                MESSAGES_DUPLICATES.inc()
                 logger.debug(
                     "Mensaje duplicado ignorado (topic=%s partition=%s offset=%s)",
                     msg.topic(), msg.partition(), msg.offset(),
                 )
-                # Si ya está en Mongo, ya lo procesamos antes. Saltamos el ETL.
                 consumer.commit(message=msg)
                 continue
 
-            # --- NUEVO EN EL #8: Cableado ETL (Redis + Postgres) ---
+            # --- CABLEADO ETL (Redis + Postgres) ---
             try:
                 passport = resolve_identity(payload_to_store, redis_client)
                 if passport:
                     assembled_data = assemble_employee(passport, payload_to_store, redis_client)
                     upsert_employee(assembled_data)
                     assembled += 1
+                    EMPLOYEES_ASSEMBLED.inc()
                     # Marcamos el mensaje en Mongo como ensamblado
                     raw_collection.update_one({"_id": document["_id"]}, {"$set": {"status": "assembled"}})
                 else:
@@ -134,6 +153,8 @@ def run_consumer() -> None:
                     if payload_to_store.get("fullname"):
                         orphan_type = "Esperando Passport (Tiene Nombre)"
                     
+                    ORPHANS_CREATED.inc() # <--- AÑADE ESTO
+
                     raw_collection.update_one({"_id": document["_id"]}, {"$set": {
                         "status": "orphan",
                         "orphan_type": orphan_type
