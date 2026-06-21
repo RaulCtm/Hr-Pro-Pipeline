@@ -1,13 +1,14 @@
 """
-Persistencia en PostgreSQL normalizado y seguro (Issue #7).
+Persistencia en PostgreSQL normalizado y seguro (Issue #7 + #17).
 
-Toma un diccionario ensamblado de Redis, hashea el passport y lo distribuye
-en las tablas normalizadas usando el UUID generado (Surrogate Key).
+Toma un diccionario ensamblado de Redis, hashea el passport y encripta
+los datos financieros (IBAN, Salary) a nivel de columna antes de persistir.
 """
 
 from __future__ import annotations
 import logging
 import hashlib
+import os
 from typing import Any
 import psycopg2
 
@@ -15,14 +16,18 @@ from core.database import get_postgres_connection
 
 logger = logging.getLogger(__name__)
 
+# Obtenemos la clave de encriptación de las variables de entorno
+ENCRYPTION_KEY = os.getenv("ENCRYPTION_KEY", "default-key")
+
 def upsert_employee(employee_data: dict[str, Any]) -> None:
     passport = employee_data.get("passport")
     if not passport:
         logger.warning("Intento de upsert sin passport. Saltando...")
         return
 
-    # 1. Hasheamos el passport (SHA-256) para no guardar PII en texto plano
     passport_hash = hashlib.sha256(passport.encode('utf-8')).hexdigest()
+    iban = employee_data.get("iban")
+    salary = employee_data.get("salary")
 
     conn = get_postgres_connection()
     if not conn:
@@ -30,7 +35,7 @@ def upsert_employee(employee_data: dict[str, Any]) -> None:
 
     try:
         with conn.cursor() as cur:
-            # 2. UPSERT en employees y obtención del UUID (Surrogate Key)
+            # 2. UPSERT en employees y obtención del UUID
             cur.execute("""
                 INSERT INTO employees (passport_hash, fullname, name, last_name, sex)
                 VALUES (%s, %s, %s, %s, %s)
@@ -49,10 +54,9 @@ def upsert_employee(employee_data: dict[str, Any]) -> None:
                 ",".join(employee_data.get("sex", [])) if isinstance(employee_data.get("sex"), list) else employee_data.get("sex")
             ))
             
-            # Capturamos el UUID que Postgres acaba de generar (o el que ya existía)
             employee_id = cur.fetchone()[0]
 
-            # 3. UPSERT en employee_locations usando el UUID
+            # 3. UPSERT en employee_locations
             cur.execute("""
                 INSERT INTO employee_locations (employee_id, address, city, country, personal_email, personal_phone)
                 VALUES (%s, %s, %s, %s, %s, %s)
@@ -67,7 +71,7 @@ def upsert_employee(employee_data: dict[str, Any]) -> None:
                 employee_data.get("country"), employee_data.get("email"), employee_data.get("telfnumber")
             ))
 
-            # 4. UPSERT en employments usando el UUID
+            # 4. UPSERT en employments
             cur.execute("""
                 INSERT INTO employments (employee_id, company_name, company_address, company_phone, company_email, job_title)
                 VALUES (%s, %s, %s, %s, %s, %s)
@@ -82,19 +86,25 @@ def upsert_employee(employee_data: dict[str, Any]) -> None:
                 employee_data.get("company_telfnumber"), employee_data.get("company_email"), employee_data.get("job")
             ))
 
-            # 5. UPSERT en finances usando el UUID
+            # 5. UPSERT en finances (CON ENCRIPTACIÓN pgcrypto)
             cur.execute("""
                 INSERT INTO finances (employee_id, iban, salary)
-                VALUES (%s, %s, %s)
+                VALUES (
+                    %s, 
+                    CASE WHEN %s IS NOT NULL THEN pgp_sym_encrypt(%s, %s) ELSE NULL END,
+                    CASE WHEN %s IS NOT NULL THEN pgp_sym_encrypt(%s, %s) ELSE NULL END
+                )
                 ON CONFLICT (employee_id) DO UPDATE SET
-                    iban = COALESCE(EXCLUDED.iban, finances.iban),
-                    salary = COALESCE(EXCLUDED.salary, finances.salary);
+                    iban = CASE WHEN EXCLUDED.iban IS NOT NULL THEN EXCLUDED.iban ELSE finances.iban END,
+                    salary = CASE WHEN EXCLUDED.salary IS NOT NULL THEN EXCLUDED.salary ELSE finances.salary END;
             """, (
-                employee_id, employee_data.get("iban"), employee_data.get("salary")
+                employee_id, 
+                iban, iban, ENCRYPTION_KEY,
+                salary, salary, ENCRYPTION_KEY
             ))
 
             conn.commit()
-            logger.debug("Empleado persistido/actualizado en esquema 3FN: %s", employee_id)
+            logger.debug("Empleado persistido/actualizado en esquema 3FN con datos financieros encriptados: %s", employee_id)
 
     except psycopg2.Error as e:
         logger.error("Error de Postgres al hacer upsert de %s: %s", passport, e)

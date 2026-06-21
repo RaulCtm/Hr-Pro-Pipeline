@@ -88,20 +88,15 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-@st.cache_data(ttl=5)
+@st.cache_data(ttl=5) # Cache corto para ver datos en tiempo real
 def load_postgres_data() -> pd.DataFrame:
     conn = get_postgres_connection()
     if not conn: return pd.DataFrame()
     try:
         query = "SELECT * FROM v_employees_complete;"
         df = pd.read_sql(query, conn)
-        def parse_salary(val):
-            if pd.isna(val) or val == "": return 0.0
-            try:
-                clean_val = re.sub(r'[^\d]', '', str(val))
-                return float(clean_val) if clean_val else 0.0
-            except ValueError: return 0.0
-        df['salary_num'] = df['salary'].apply(parse_salary)
+        # Como los datos financieros están encriptados, no parseamos el salario aquí.
+        # Solo verificamos si el dato encriptado existe para mostrar "Sí/No" en RRHH.
         return df
     except Exception as e:
         st.error(f"Error al leer PostgreSQL: {e}")
@@ -243,15 +238,26 @@ elif page == "Empleados Completos":
     if selected_company_c != 'Todas':
         filtered_complete_df = filtered_complete_df[filtered_complete_df['company_name'] == selected_company_c]
 
-    filtered_complete_df = filtered_complete_df.sort_values(by=sort_options_c[sort_by_c], ascending=ascending_c, na_position='last')
+        filtered_complete_df = filtered_complete_df.sort_values(by=sort_options_c[sort_by_c], ascending=ascending_c, na_position='last')
 
-    # Mostramos todos los campos ensamblados
+    # --- NUEVO: Data Masking para RRHH ---
+    # Enmascaramos el IBAN dejando solo los primeros 4 y últimos 4 caracteres
+    def mask_iban(iban):
+        if pd.isna(iban) or not isinstance(iban, str) or len(iban) < 8:
+            return iban
+        return f"{iban[:4]}{'*' * (len(iban) - 8)}{iban[-4:]}"
+
+    # Aplicamos el enmascaramiento a una copia para no perder el dato real si lo necesitamos en memoria
+    display_df = filtered_complete_df.copy()
+    display_df['iban'] = display_df['iban'].apply(mask_iban)
+
+    # Mostramos todos los campos ensamblados (usamos display_df en vez de filtered_complete_df)
     columns_to_show_c = ['fullname', 'personal_email', 'personal_phone', 'address', 'city', 'country', 'company_name', 'job_title', 'iban', 'salary_num', 'updated_at']
     st.dataframe(
-        filtered_complete_df[columns_to_show_c].rename(columns={
+        display_df[columns_to_show_c].rename(columns={
             'fullname': 'Nombre Completo', 'personal_email': 'Email', 'personal_phone': 'Teléfono',
             'address': 'Dirección', 'city': 'Ciudad', 'country': 'País', 'company_name': 'Empresa',
-            'job_title': 'Puesto', 'iban': 'IBAN', 'salary_num': 'Salario ($)', 'updated_at': 'Actualizado'
+            'job_title': 'Puesto', 'iban': 'IBAN (Enmascarado)', 'salary_num': 'Salario ($)', 'updated_at': 'Actualizado'
         }),
         use_container_width=True, hide_index=True, height=500
     )

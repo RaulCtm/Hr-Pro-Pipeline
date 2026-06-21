@@ -35,21 +35,24 @@ CREATE TABLE IF NOT EXISTS employments (
     PRIMARY KEY (employee_id)
 );
 
+-- (El resto del esquema se queda igual, solo cambia la tabla finances y la vista)
+
 -- Tabla de datos bancarios
 CREATE TABLE IF NOT EXISTS finances (
     employee_id UUID REFERENCES employees(employee_id) ON DELETE CASCADE,
-    iban VARCHAR(50),
-    salary VARCHAR(50),
+    iban BYTEA, -- Ahora es binario porque estará encriptado
+    salary BYTEA, -- Encriptado también
     PRIMARY KEY (employee_id)
 );
 
--- Vista analítica (oculta el passport_hash, expone solo datos de negocio)
+-- Vista analítica (Como RRHH no debe ver el IBAN/Salario real, no lo desencriptamos aquí)
 CREATE OR REPLACE VIEW v_employees_complete AS
 SELECT 
     e.employee_id, e.fullname, e.name, e.last_name, e.sex, e.updated_at,
     l.address, l.city, l.country, l.personal_email, l.personal_phone,
     emp.company_name, emp.company_address, emp.company_phone, emp.company_email, emp.job_title,
-    f.iban, f.salary
+    f.iban AS iban_encrypted, -- Exponemos el dato encriptado (basura para un hacker)
+    f.salary AS salary_encrypted
 FROM employees e
 LEFT JOIN employee_locations l ON e.employee_id = l.employee_id
 LEFT JOIN employments emp ON e.employee_id = emp.employee_id
