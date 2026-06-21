@@ -215,7 +215,7 @@ elif page == "Empleados Completos":
     col1, col2 = st.columns(2)
     with col1: st.metric("Empleados Ensamblados", len(complete_df))
     with col2:
-        iban_count_complete = complete_df['iban_encrypted'].notna().sum()
+        iban_count_complete = complete_df['has_iban'].sum()
         st.metric("Con IBAN Registrado", iban_count_complete)
 
     st.markdown("<div style='height: 2rem;'></div>", unsafe_allow_html=True)
