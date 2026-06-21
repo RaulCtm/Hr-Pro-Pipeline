@@ -94,8 +94,16 @@ def load_postgres_data() -> pd.DataFrame:
     try:
         query = "SELECT * FROM v_employees_complete;"
         df = pd.read_sql(query, conn)
-        # Como los datos financieros están encriptados, no parseamos el salario aquí.
-        # Solo verificamos si el dato encriptado existe para mostrar "Sí/No" en RRHH.
+        
+        # Como los datos financieros están encriptados (BYTEA), Streamlit no sabe 
+        # serializarlos en caché. Los convertimos a booleanos (True/False) aquí mismo.
+        if 'iban_encrypted' in df.columns:
+            df['has_iban'] = df['iban_encrypted'].notna()
+            df = df.drop(columns=['iban_encrypted'])
+        if 'salary_encrypted' in df.columns:
+            df['has_salary'] = df['salary_encrypted'].notna()
+            df = df.drop(columns=['salary_encrypted'])
+            
         return df
     except Exception as e:
         st.error(f"Error al leer PostgreSQL: {e}")
@@ -148,7 +156,7 @@ if page == "Panel General":
     with col2: st.metric("Empresas Activas", df_pg['company_name'].nunique())
     with col3: st.metric("Ciudades", df_pg['city'].nunique())
     with col4:
-        iban_count = df_pg['iban_encrypted'].notna().sum()
+        iban_count = df_pg['has_iban'].sum()
         st.metric("Empleados con IBAN", iban_count)
 
     st.markdown("<div class='section-title'>Explorador Rápido</div>", unsafe_allow_html=True)
@@ -240,8 +248,9 @@ elif page == "Empleados Completos":
 
     # --- Data Masking para RRHH (Basado en Encriptación de BD) ---
     display_df = filtered_complete_df.copy()
-    display_df['has_iban'] = display_df['iban_encrypted'].apply(lambda x: 'Sí' if pd.notna(x) else 'No')
-    display_df['has_salary'] = display_df['salary_encrypted'].apply(lambda x: 'Sí' if pd.notna(x) else 'No')
+    # Convertimos los booleanos a 'Sí'/'No' para que se vea bonito en la tabla
+    display_df['has_iban'] = display_df['has_iban'].apply(lambda x: 'Sí' if x else 'No')
+    display_df['has_salary'] = display_df['has_salary'].apply(lambda x: 'Sí' if x else 'No')
 
     # Mostramos todos los campos ensamblados
     columns_to_show_c = ['fullname', 'personal_email', 'personal_phone', 'address', 'city', 'country', 'company_name', 'job_title', 'has_iban', 'has_salary', 'updated_at']
